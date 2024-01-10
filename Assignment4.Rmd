@@ -583,7 +583,6 @@ biethnicity2_sf$blackstopodds <- biethnicity2_sf$blackstopperc / biethnicity2_sf
 biethnicity2_sf$nonblackpopperc <- 100 - biethnicity2_sf$popperc
 
 # create custom breaks for odds
-summary(biethnicity2_sf$blackstopodds)
 biethnicity2_sf$blackstopodds_bin <- cut(biethnicity2_sf$blackstopodds, breaks = c(0,1,3, max(biethnicity2_sf$blackstopodds, na.rm = TRUE)), include.lowest = TRUE)
 
 # create classes
@@ -773,11 +772,7 @@ blckwht_sf$ratioblckwht <- blckwht_sf$blackstopodds / blckwht_sf$whitestopodds
 # run regression at MSOA level
 reg.data <- left_join(bivardata.depriv2, st_drop_geometry(blckwht_sf), by = "Middle.layer.Super.Output.Areas.Code")
 
- ggplot(reg.data, aes(x=perc_depriv_2plus, y=ratioblckwht)) +
-  geom_point(colour = "black", size = 3) +    # Use black circles
-  geom_smooth(method=lm)
 
- 
 model.1 <- lm(ratioblckwht ~ perc_depriv_2plus, data = reg.data)
 summary(model.1)
 
@@ -896,9 +891,6 @@ reg.data4$povrate <- as.numeric(reg.data4$povrate)
 reg.data4$childpov <- as.numeric(reg.data4$childpov)
 
 # examine relationships
-ggplot(reg.data4, aes(x=incineq, y=ratioblckwht)) +
-  geom_point(colour = "black", size = 3) +    # use black circles
-  geom_smooth(method=lm)
 
 # run regression model with all living standard indicators and print summary
 model.4 <- lm(ratioblckwht ~  incineq  + incdepriv + childpov + povrate, data = reg.data4)
