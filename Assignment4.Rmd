@@ -13,7 +13,6 @@ Github-repo: https://github.com/joharameyer/MY472Assignment4.git
 This project examines the stops-and-searches between 2021 and 2023 by London police forces (Met Police and City of London Police). It seeks to investigate biases in who is experiencing stop-and-search by the police in London with a particular focus on officer-identified ethnicity and the legislation under which stops-and-searches were performed. The project uses statistical and spatial analysis techniques to investigate not just ‘if’ stop-and-search policing is biased but also attempts to shed light on just ‘how’ biased the use of stops-and-searches is. 
 
 ## Data
-
 ### Stop and Search Data
 Data on stops-and-searches was taken from two sources. First, the 'ukpolice' package was used to download stop-and-search data from the UK Police's public API. However, as Met Police data was missing for May, June, November, and December 2023 and November 2022 an extract from the Met Police's Stop-and-Search Dashboard was used to supplement the dataset. Download relevant extract ending December 2023 here: https://data.london.gov.uk/dataset/mps-stop-and-search-public-dashboard-data.
 
@@ -340,7 +339,7 @@ ggplot(stopsearch_2023, aes(x = age_range, fill = factor(officer_defined_ethnici
             position = position_dodge(width = 0.9), vjust = 1.6, size = 3, color = "white")
 
 ```
-```{r scraping population ethnicity table}
+```{r scraping population ethnicity table, include=FALSE}
 # In this section, table data was scraped to get data on ethnicity at the London population level.
 # source: https://www.ethnicity-facts-figures.service.gov.uk/uk-population-by-ethnicity/national-and-regional-populations/regional-ethnic-diversity/latest/
 
@@ -413,7 +412,7 @@ ggplot(nonw_odds_plot, aes(x = nwoddsratio, y = as.factor(year), color = ethnici
 
 ```
 
-```{r download census data w scraper, results='hide'}
+```{r download census data w scraper, results='hide', include=FALSE}
 # In this section, I built a RSelenium web-scraping function to help download 2021 census data on ethnicity and deprivation with the same coverage and spatial scale settings (London MSOA).
 
 # launching the RSelenium driver and browser
@@ -485,7 +484,7 @@ rD$server$stop()
 ```
 
 
-```{r spatial census and stop and search, results='hide'}
+```{r spatial census and stop and search, results='hide', include=FALSE}
 # In this section, I load the scraped census data and join it to MSOA shapefile data and convert the stop and search data to spatial data. I first clean the census data and calculate the percentage of households with deprivation in at least two dimensions by MSOA.
 
 # load deprivation census data
@@ -641,6 +640,7 @@ finalPlot <- ggdraw() +
 # plot final plot
 finalPlot
 ```
+
 ## Living Standards
 
 To better understand the context within which stops-and-searches occur in London, another bivariate plot was created examining the number of stops-and-searches per 100 households and household deprivation in two or more dimensions. As can be seen on Map 2, there are areas with low deprivation levels in central London that frequently see more stops-and-searches than there are households in that area and other low deprivation areas (generally outside of central London) with very few stops-and-searches.
@@ -728,7 +728,7 @@ finalPlot2 <- ggdraw() +
   
 ```
 
-```{r statistical analysis part 1, results= 'hide'}
+```{r statistical analysis part 1, results= 'hide', include=FALSE}
 # In this section, I ask what proportion of the disproportionality in black/white odds is explained by deprivation? 
 
 # subset census data to black or white ethnicity
@@ -772,7 +772,7 @@ blckwht_sf$ratioblckwht <- blckwht_sf$blackstopodds / blckwht_sf$whitestopodds
 # run regression at MSOA level
 reg.data <- left_join(bivardata.depriv2, st_drop_geometry(blckwht_sf), by = "Middle.layer.Super.Output.Areas.Code")
 
-
+ 
 model.1 <- lm(ratioblckwht ~ perc_depriv_2plus, data = reg.data)
 summary(model.1)
 
