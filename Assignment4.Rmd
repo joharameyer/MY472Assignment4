@@ -1,0 +1,914 @@
+---
+title: "Assignment 4"
+author: '201843064'
+date: "2024-01-10"
+output: html_document
+---
+# Stop and Search (Over)Policing
+Github-repo: https://github.com/joharameyer/MY472Assignment4.git
+
+## Introduction
+“Stop-and-search” is the police power that allows officers to stop a person and detain them to perform a search. While stops-and-searches are regularly suspicion-based, for example, where an officer believes there are “reasonable grounds to suspect” that someone is carrying a weapon, under “Section 60” police also have the power to conduct suspicion-less stops-and-searches for a certain time period. Human rights groups have critised that the use of stop-and-search practices has disproportionately impacted racialised communities and have raised concerns that Section 60 is fuelling further discriminatory uses. 
+
+This project examines the stops-and-searches between 2021 and 2023 by London police forces (Met Police and City of London Police). It seeks to investigate biases in who is experiencing stop-and-search by the police in London with a particular focus on officer-identified ethnicity and the legislation under which stops-and-searches were performed. The project uses statistical and spatial analysis techniques to investigate not just ‘if’ stop-and-search policing is biased but also attempts to shed light on just ‘how’ biased the use of stops-and-searches is. 
+
+## Data
+
+### Stop and Search Data
+Data on stops-and-searches was taken from two sources. First, the 'ukpolice' package was used to download stop-and-search data from the UK Police's public API. However, as Met Police data was missing for May, June, November, and December 2023 and November 2022 an extract from the Met Police's Stop-and-Search Dashboard was used to supplement the dataset. Download relevant extract ending December 2023 here: https://data.london.gov.uk/dataset/mps-stop-and-search-public-dashboard-data.
+
+### Census Data
+2021 census data was used to understand the demographics of stop-and-search in comparison and relation to the population of London. Census data on ethnicity (https://www.ons.gov.uk/datasets/TS021/editions/2021/versions/1) and deprivation (https://www.ons.gov.uk/datasets/TS011/editions/2021/versions/5) was downloaded using a webscraping function to ensure the spatial scale (MSOA) and coverage selection (London) is consistent.
+
+### Other population level data
+Furthermore, data on ethnicity composition across all of London was scraped from Table 1. of the following Gov.uk page: https://www.ethnicity-facts-figures.service.gov.uk/uk-population-by-ethnicity/national-and-regional-populations/regional-ethnic-diversity/latest/.
+
+Similarly, further data on living standards (80:20 ratio income inequality, AHC child poverty, income deprivation, and poverty rate) across London boroughs was scraped from Trust for London (https://trustforlondon.org.uk/data/boroughs/).
+
+### Shapefiles
+To map the findings in this analysis, shapefiles were downloaded and merged with the data. MSOA level shapefiles were downloaded from https://borders.ukdataservice.ac.uk/easy_download.html for England 2021 and subset to London. London borough shapefiles were downloaded from https://data.london.gov.uk/dataset/statistical-gis-boundary-files-london.
+
+## Analysis
+```{r setup, include=FALSE}
+# suppress warning messages
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo = FALSE) 
+
+# load relevant packages
+library(tidyverse)
+if (!require(ukpolice)) install.packages('ukpolice') 
+library(viridis)
+library(sf)
+library(rvest)
+library(RSelenium)
+library(dplyr)
+library(biscale)
+library(cowplot)
+library(stringr)
+
+```
+
+```{r load police data, include=FALSE}
+# In this section I load police data from two sources.
+# Note: UK police data for the missing months is likely to become available, this should be checked prior to running the script to avoid duplicate data. 
+
+# Note: the 'ukpolice' package can be used to download data from the 'UK Police' public data API. 
+# Package function 'ukc_stop_search_force' downloads data by police force by month in a year.
+# Since I want to load police data from the API for 2021-2023, I built 'the 'stop_search_years' to
+# collect data by police force by years.
+
+# function to collect stops and searches by year
+stop_search_years <- function(years, policeforce) {
+  
+  # create empty dataset to store data
+   all_stop_search <- NULL
+   
+   # collect data for each month in each year
+  for (year in years) {
+    for (month in 1:12) {
+    datecol <- sprintf("%d-%02d", year, month)
+    month_stop_search <- ukc_stop_search_force(policeforce, date = datecol)
+    
+    # if data is available for the month add it to the final dataframe
+    if (!is.null(month_stop_search) && nrow(month_stop_search) > 0) {
+      month_stop_search$month_year <- datecol
+      all_stop_search <- rbind(all_stop_search, month_stop_search)
+     }
+    }
+    Sys.sleep(2)
+  }
+  return(all_stop_search)
+}
+
+# load met police data for 2021, 2022 and 2023
+met_ss_21_22_23 <- stop_search_years(c(2021, 2022, 2023), "metropolitan")
+met_ss_21_22_23$force <- "Metropolitan Police"
+table(met_ss_21_22_23$date) # check if data is available for all months
+#!! met has yet to release data for may, june, november, and december 2023 and november 2022 !!
+
+# load city of london police data for 2021, 2022 and 2023
+city_ss_21_22_23 <- stop_search_years(c(2021, 2022, 2023), "city-of-london")
+city_ss_21_22_23$force <- "City of London Police"
+table(city_ss_21_22_23$date)
+# data available for all months
+
+# join metropolitan and city of london police datasets
+london_21_22_23 <- rbind(met_ss_21_22_23, city_ss_21_22_23)
+
+# change date time to just date
+london_21_22_23$datetime <- as.Date(london_21_22_23$datetime)
+
+# add name column to add borough data to later
+london_21_22_23$NAME <- NA 
+#------------------------
+# Given that there is missing data in the stop and search data for may, june, november, and
+# december 2023 and november 2022 in the Met police data, I looked whether I could find this data elsewhere.
+# As it turns out, data is available for the missing months in the Met Police's Stop and Search Dashboard.
+# Extracts of which are available for download here: https://data.london.gov.uk/dataset/mps-stop-and-search-public-dashboard-data.
+
+# !! Before running the code, check if data is still unavailable !!
+
+# define path to assignment folder
+path_to_folder <- "~/LSEd4dsc/Assignment 4/"
+
+# load extract ending december 2023
+extract <- read.csv(paste0(path_to_folder, "Stops_LDS_Extract_24MonthsToEnd_202312.csv"))
+
+# make date column date and subset to 2022-2023
+extract$Date <- as.Date(as.character(extract$Date))
+extract2022_23 <- subset(extract, extract$Date >= as.Date("2022-01-01") & extract$Date < as.Date("2024-01-01"))
+
+# get column names
+colnames(met_ss_22_23)
+colnames(extract2022_23)
+
+# add month year column
+extract2022_23$month_year <- format(extract2022_23$Date, "%Y-%m")
+
+# subset to months for which no data was available (2023 may, june, november, and december and 2022 november)
+# clean data to match column names and classifications in stop and search data dataframe
+
+extractmissing <- extract2022_23 %>% filter(month_year %in% c("2022-11",  "2023-12", "2023-11", "2023-05", "2023-06")) %>% mutate(age_range = case_when(
+    Apparent.Age < 10 ~ "under 10",
+    between(Apparent.Age, 10, 17) ~ "10-17",
+    between(Apparent.Age, 18, 24) ~ "18-24",
+    between(Apparent.Age, 25, 34) ~ "25-34",
+    Apparent.Age > 34 ~ "over 34",
+    TRUE ~ NA_character_
+  )) %>% mutate( outcome = case_when(
+    Outcome == "1 No further action" ~ "A no further action disposal",
+    Outcome == "4 Arrested" ~ "Arrest",
+    Outcome == "14 Caution (simple or conditional)" ~ "Caution (simple or conditional)",
+    Outcome == "13 Community resolution" ~ "Community resolution",
+    Outcome == "11 Penalty Notice (PND/FPN)" ~ "Penalty Notice for Disorder",
+    Outcome == "12 Postal Charge Requisition / Summons" ~ "Summons / charged by post",
+    TRUE ~ NA_character_
+  ) ) %>% mutate( involved_person = case_when(
+    gsub(" ", "", Subject) == "Person" |
+    gsub(" ", "", Subject) == "PersonandVehicle" ~ "TRUE",
+    gsub(" ", "", Subject) == "Vehicle" ~ "FALSE",
+    TRUE ~ NA_character_
+  ) ) %>% mutate( officer_defined_ethnicity =  EA.Group 
+  ) %>% mutate( gender = case_when(
+    gsub(" ", "", Gender) == "F" ~ "Female",
+    gsub(" ", "", Gender) == "M" ~ "Male",
+    gsub(" ", "", Gender) == "U" ~ "Other",
+    TRUE ~ NA_character_
+  )) %>% mutate( legislation = case_when(
+    Reason.for.Stop == "K s.60 CJPO Weapons"
+    ~ "Criminal Justice and Public Order Act 1994 (section 60)",
+    Reason.for.Stop == "C Firearms (s.47 Firearms Act)"
+    ~ "Firearms Act 1968 (section 47)",
+    Reason.for.Stop == "B Drugs (s.23 Misuse of Drugs Act)" |
+    Reason.for.Stop == "Y Psychoactive Substances"
+    ~ "Misuse of Drugs Act 1971 (section 23)",
+    Reason.for.Stop == "A Stolen property (s.1 PACE)" |
+      Reason.for.Stop == "D Weapons Point & Blades (s.1 PACE s.139 CJ Act)" |
+      Reason.for.Stop == "F Going equipped (s.1 PACE)" |
+      Reason.for.Stop == "L Articles to cause Criminal Damage (s.1 PACE)" |
+      Reason.for.Stop == "Z Fireworks (s.1 PACE)" 
+    ~ "Police and Criminal Evidence Act 1984 (section 1)",
+    TRUE ~ NA_character_
+  )) %>% mutate( datetime = Date ) %>% mutate( type = case_when(
+    gsub(" ", "", Subject) == "Person" ~ "Person search",
+    gsub(" ", "", Subject) == "PersonandVehicle" ~ "Person and Vehicle search",
+    gsub(" ", "", Subject) == "Vehicle" ~ "Vehicle search",
+    TRUE ~ NA_character_
+  )) %>% mutate( object_of_search = case_when(
+      Reason.for.Stop == "K s.60 CJPO Weapons"
+    ~ "Anything to threaten or harm anyone",
+      Reason.for.Stop == "C Firearms (s.47 Firearms Act)"
+    ~ "Firearms",
+      Reason.for.Stop == "B Drugs (s.23 Misuse of Drugs Act)"
+    ~ "Controlled drugs",
+      Reason.for.Stop == "A Stolen property (s.1 PACE)"
+    ~ "Stolen goods",
+      Reason.for.Stop == "D Weapons Point & Blades (s.1 PACE s.139 CJ Act)"
+    ~ "Offensive weapons",
+      Reason.for.Stop == "F Going equipped (s.1 PACE)"
+    ~ "Evidence of offences under the Act",
+      Reason.for.Stop == "L Articles to cause Criminal Damage (s.1 PACE)" 
+    ~ "Articles for use in criminal damage",
+      Reason.for.Stop == "Z Fireworks (s.1 PACE)" 
+    ~ "Fireworks",
+      TRUE ~ NA_character_
+   )) %>% mutate( latitude = NA,
+                  longitude = NA
+  ) %>% mutate( force = "Metropolitan Police") %>% mutate( NAME = Borough.of.Stop)
+
+
+# empty legislation rows were removed, the extract appears to also iunclude stop and searches on the basis of the terrorism act
+extractmissing <- subset(extractmissing, !is.na(extractmissing$legislation))
+
+# select relevant rows to bind with police data
+extractmissing <- extractmissing %>% select( "age_range", "outcome", "involved_person", "gender", "legislation", "datetime", "officer_defined_ethnicity", "type", "object_of_search", "latitude", "longitude", "month_year")
+
+#------------------------
+# Now, I join the extract data back to the original stop and search dataframe to create a complete dataframe for 2021-2023 for Met and City of London Police.
+
+# select relevant rows to bind with extract data
+stopsearch <- london_21_22_23 %>% select( "age_range", "outcome", "involved_person", "gender", "legislation", "datetime", "officer_defined_ethnicity", "type", "object_of_search", "latitude", "longitude", "month_year")
+
+# join missing data to police date
+stopsearch <- rbind(stopsearch, extractmissing)
+
+# check for mistakes in matching classifications/colnames
+# table(stopsearch$age_range)
+# table(stopsearch$month_year)
+# table(stopsearch$legislation)
+
+# subset to relevant legislations, stops and searches under section 139B or s36(2) are outliers
+`%notin%` <- Negate(`%in%`)
+stopsearch <- subset(stopsearch, stopsearch$legislation %notin% c("Criminal Justice Act 1988 (section 139B)",
+                                                   "Psychoactive Substances Act 2016 (s36(2))") &
+                                                    !is.na(stopsearch$legislation))
+
+# add seperate year and month coloumn
+stopsearch$year <- format(stopsearch$datetime, "%Y")
+stopsearch$month <- format(stopsearch$datetime, "%m")
+
+```
+
+```{r load borough data, include=FALSE }
+# In this section, I load london borough boundaries.
+
+# read in borough data, source: https://data.london.gov.uk/dataset/statistical-gis-boundary-files-london
+
+borough <- st_read(paste0(path_to_folder, "statistical-gis-boundaries-london 4/ESRI/London_Borough_Excluding_MHW.shp")) 
+
+```
+## Stop and Search and Officer percieved Ethnicity
+As seen in Figure 1 below, people officers who identify as black appear to be the most stopped ethnicity across all legislations besides the Misuse of Drugs legislation (and Section 1 in 2021). Under the Misuse of Drugs legislation white people were the most stopped-and-searched. Section 60 stops-and-searches were less common but it is notable that stops-and-searches under this section doubled between 2022 and 2023.
+
+Note: To improve this analysis it would be good to investigate the relationship between the ethnicity officers assign and the ethnicity self-reported by those stopped.
+
+```{r plot by legislation and race}
+# In this section, I plot stops and searches by legislation and ethnicity for each year.
+
+# calculate number of stops and searches by year by race by legislation, and for each legislation and year, percentage by ethnicity, as well as total stops and searches
+a2 <- stopsearch  %>%
+group_by(officer_defined_ethnicity, legislation, year) %>% summarise(count = n()) %>% group_by(legislation, year) %>%
+  mutate(percentage = count / sum(count) * 100) %>% mutate(total = sum(count))
+
+# rename NAs to 'Missing'
+a2$officer_defined_ethnicity[is.na(a2$officer_defined_ethnicity) ] <- "Missing"
+
+# add \n to write legislation name on new line in plot
+a2$legislation <- gsub("\\(", "\n(", a2$legislation) # added 
+
+# use a color palette from viridis
+my_palette <- viridis_pal(option = "C")(6)
+
+# make ethnicity factor and define order
+a2$officer_defined_ethnicity <- factor(a2$officer_defined_ethnicity,
+                                       levels = c("Missing", "Other", "Asian", "White", "Black"),
+                                       ordered = TRUE)
+
+# plot by year, legislation, and race 
+ggplot(a2, aes(x = percentage,
+                       y = year,
+                       fill = officer_defined_ethnicity)) +
+  geom_col(position = "stack", width = 0.9) +
+  geom_text(aes(x = percentage,
+                label = ifelse(percentage > 6, paste(round(percentage, 1)), "")),
+            position = position_stack(vjust = 0.97),
+            hjust = 1.1,
+            size = 3,
+            color = "white") +
+  geom_text(aes(x = 0, label = paste0("N = ",total)),
+            y = a2$year,
+            position = position_nudge(x = 103),
+            hjust = 0,
+            size = 2.8, color = "black") + 
+  coord_cartesian(clip = 'off') +
+  # Add total as annotation to the left
+  scale_fill_manual(values = my_palette) +
+  labs(title = "Percentage of stops and searches under\n each legislation, by percieved ethnicity",
+       x = "Percentage",
+       y = "",
+       fill = "Ethnicity") +
+  theme_minimal() +
+  theme(legend.position = "top",
+        legend.title = element_text(face = "bold"), 
+        legend.text = element_text(size = 8.5),
+        axis.text = element_text(size = 10),
+        plot.title = element_text(face = "bold", hjust = 0, size = 14), 
+        axis.title = element_text(face = "bold", size = 12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        plot.margin = unit(c(1,2.1,1,1), "lines")) +
+  guides(fill = guide_legend(reverse = TRUE)) +
+  facet_grid(legislation ~ ., switch = 'both') +
+  theme(strip.text.y.left = element_text(angle = 0),
+        strip.text.x = element_text(angle = 0),
+        strip.placement = "outside")
+
+
+```
+Differences between black and white stops-and-searches also emerge when examining age groups. Here, as seen in Figure 2. below, only among those who officers identify as 'white' is the most common age group to get stopped-and-searched not 18-24 year olds but over 34-year-olds.
+
+```{r plot by age and ethnicity 2023}
+# In this section, I plot of stops and searches by age and ethnicity for each year.
+
+# filter out rows with NA in 'officer_defined_ethnicity'
+stopsearch_filtered <- stopsearch[!is.na(stopsearch$officer_defined_ethnicity), ]
+
+# subset data to include only observations from the year 2023
+stopsearch_2023 <- subset(stopsearch_filtered, stopsearch_filtered$year == "2023")
+
+# order levels of 'officer_defined_ethnicity' as White, Black, Asian, Other
+stopsearch_2023$officer_defined_ethnicity <- factor(stopsearch_2023$officer_defined_ethnicity, 
+                                                    levels = c("Black", "White", "Asian", "Other"))
+
+# create a bar plot with facets by ethnicity
+ggplot(stopsearch_2023, aes(x = age_range, fill = factor(officer_defined_ethnicity))) +
+  geom_bar(position = "dodge", color = NA) +
+  labs(title = "Age Range of Stops and Searches by percieved Ethnicity (2023)",
+       x = "Age Range",
+       y = "Count") +
+  facet_wrap(~officer_defined_ethnicity, scales = "fixed", ncol = 2) +
+  theme_minimal() +
+  theme(legend.position = "top",
+        legend.title  = element_text(face = "bold"), 
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+        axis.title.y = element_text(margin = margin(r = 10)),
+        strip.text = element_text(size = 10, face = "bold", vjust = 1),
+        plot.title = element_text(size = 12, hjust = 0.5),
+        axis.title.x = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 8)) +
+  scale_fill_manual(values = c( "#fca637","#e06462", "#b12a8f", "#6921a8"), name = "Ethnicity") +
+  geom_text(stat = "count", aes(label = ifelse(..count.. > 3000, as.character(..count..), "")), 
+            position = position_dodge(width = 0.9), vjust = 1.6, size = 3, color = "white")
+
+```
+```{r scraping population ethnicity table}
+# In this section, table data was scraped to get data on ethnicity at the London population level.
+# source: https://www.ethnicity-facts-figures.service.gov.uk/uk-population-by-ethnicity/national-and-regional-populations/regional-ethnic-diversity/latest/
+
+# define url and load html data from url
+url <- "https://www.ethnicity-facts-figures.service.gov.uk/uk-population-by-ethnicity/national-and-regional-populations/regional-ethnic-diversity/latest/"
+html_content <- read_html(url)
+
+# read in data from table 1 and clean
+tab <- html_table(html_content, fill = TRUE)[[1]] 
+tab <- tab[-1, ] # remove the first row with % signs
+
+# create 'white' column from 'white british' and 'white other'
+tab$White <- as.numeric(tab$`White British`) + as.numeric(tab$`White other`)
+# colnames(tab)
+
+# tidy data and remove 'white british' and 'white other'
+pop_london_ethnicity <- tab %>% select(-c("White British","White other")) %>% filter(Geography == "London") %>% select(-Geography) %>% mutate_if(is.character, as.numeric) %>%
+pivot_longer(
+    cols = c("Asian", "Black", "Mixed", "Other", "White"),
+    names_to = "ethnicity",
+    values_to = "prop")
+
+```
+
+## Odds of Stop and Search
+Accounting for the demographics of the population of London, it is possible to calculate the odds of getting stopped-and-searched by ethnicity. Figure 3. below shows the odds of non-white people getting stopped-and-searched compared to white people. As can be seen in the graph, the odds of getting stopped-and-searched are almost always far higher among non-white people.
+
+The odds of stop-and-search for black people are at minimum 2.5 times higher than white people across the legislations. Indeed, a black person's odds of getting stopped for a search under Section 60 are**7 times that of a white person**!
+
+```{r odds of stop and search}
+# In this section, I calculate population population adjusted odds of stop and search by ethnicity and plot odds ratio of stop and search by legislation for non-white compared to white.
+
+# calculate odds ration, aca. likelihood of ethnicity X being searched under legislation Y
+odds <- merge(a2, pop_london_ethnicity, by.x = "officer_defined_ethnicity", by.y = "ethnicity") 
+
+# adjust odds to population of london
+population_adj_odds<- odds %>% group_by(officer_defined_ethnicity, legislation, year) %>% summarise(odds = percentage/prop)
+
+# compare the odds of being stopped and searched between Black and White (odds ratio)
+bw_odds<- population_adj_odds %>% filter(officer_defined_ethnicity %in% c("Black", "White")) %>% group_by(legislation, year) %>% summarise(blackwhiteodds = odds[officer_defined_ethnicity == "Black"] /odds[officer_defined_ethnicity == "White"])
+
+# compare the odds of being stopped and searched between all other than white compared (odds ratio)
+nonw_odds<- population_adj_odds %>% group_by(legislation, year) %>%
+  summarise(blackwhiteodds = odds[officer_defined_ethnicity == "Black"] /odds[officer_defined_ethnicity == "White"], asianwhiteodds = odds[officer_defined_ethnicity == "Asian"] /odds[officer_defined_ethnicity == "White"], otherwhiteodds = odds[officer_defined_ethnicity == "Other"] /odds[officer_defined_ethnicity == "White"])
+
+# !! Note: the population data also includes a mixed category (5.7%), which the police data didn't include. thus, the odds are likely slightly higher or lower than calculated here !!
+
+# odds ratio for all legislations by ethnicity
+nonw_odds_plot <- nonw_odds %>%
+  pivot_longer(cols = c(blackwhiteodds, asianwhiteodds, otherwhiteodds), names_to = "ethnicity", values_to = "nwoddsratio")
+
+# plot odds ratio by legislation and ethnicity
+ggplot(nonw_odds_plot, aes(x = nwoddsratio, y = as.factor(year), color = ethnicity)) +
+  geom_point(size = 2) +  # Use points for dot plot
+  labs(title = "Odds Ratios of Being Stopped and Searched by Non-White Ethnicity\nCompared to White by Legislation",
+       x = "Odds Ratio",
+       y = "Year",
+       color = "Ethnicity") +
+  theme_light() +
+  scale_color_manual(values = c("blackwhiteodds" = "#fca637", "asianwhiteodds" = "#d758b7", "otherwhiteodds" = "#6921a8"),
+                     name = "Ethnicity",  # Change name in the legend
+                     labels = c("Asian", "Black", "Other")) + 
+  geom_vline(xintercept=1, linetype='dotted', col = 'red')+
+  theme(legend.position = "top",
+        legend.title = element_blank(),  # Remove legend title
+        plot.title = element_text(hjust = 0.5,face = "bold"),
+        strip.background = element_rect(fill = "white", color = "white"),
+        strip.text = element_text(colour = "black")) +  # Set strip background to white
+  facet_wrap(~legislation)
+
+```
+
+```{r download census data w scraper, results='hide'}
+# In this section, I built a RSelenium web-scraping function to help download 2021 census data on ethnicity and deprivation with the same coverage and spatial scale settings (London MSOA).
+
+# launching the RSelenium driver and browser
+rD <- rsDriver(browser=c("firefox"), verbose = F, port = netstat::free_port(random = TRUE), chromever = NULL) 
+driver <- rD$client
+
+# store the xpaths for selector bottons and boxes in a list
+selector_list <- list()
+selector_list$areatype_button <- '/html/body/div/div/main/div/div/div[2]/section[2]/form/div/div/div/div[2]/dl/dd[2]/button'
+selector_list$coverage_button <- '/html/body/div/div/main/div/div/div/div/section/div/div/div/div[3]/dl/dd[2]/a'
+selector_list$coveragearea_dropdown <- '//*[@id="larger-area-select"]'
+selector_list$continue_button <- '/html/body/div/div/main/div/div/div/div/form/div/button'
+selector_list$areasearch_box <- '//*[@id="parent-search"]'
+selector_list$search_button <-'/html/body/div/div/main/div/div/div/div/form/fieldset/div/div[2]/div/div/div[2]/span/span/button'
+selector_list$get_button <- '/html/body/div/div/main/div/div/div/div/form/fieldset/div/div[2]/div/div/div[3]/fieldset/ul/li/button'
+selector_list$continue_button2 <- '/html/body/div/div/main/div/div/div/div/form/button'
+selector_list$getdata_button <- '/html/body/div/div/main/div/div/div/div/form/button'
+selector_list$download_button <- '/html/body/div/div/main/div/div/div[2]/section[3]/div[1]/form/button'
+
+# 'census_msoaregion_scraper' is a  scraping function that helps download 2021 census data
+# within a specified region at MSOA level
+# - input: url to relevant census data download page, region of interest
+# - output: download of census data within region at MSOA level
+census_msoaregion_scraper <- function(url, region) {
+  
+  # navigate to URL
+  driver$navigate(url)
+     Sys.sleep(5)
+
+  # select MSOA boundaries
+  areatype.select <- driver$findElement(using = 'xpath', value = selector_list$areatype_button)$clickElement()
+  areatype.select.msoa <- driver$findElement(using = 'xpath', value = '//*[@id="msoa-label"]')$clickElement()
+     Sys.sleep(2)
+  continue.select <- driver$findElement(using = 'xpath', value = selector_list$continue_button)$clickElement()
+
+  # select region coverage and search for region specified 
+  coverage.select <- driver$findElement(using = 'xpath', value = selector_list$coverage_button)$clickElement()
+  withinarea.select <- driver$findElement(using = 'xpath', value = '/html/body/div/div/main/div/div/div/div/form/fieldset/div/div[2]/div/label')$clickElement()
+     Sys.sleep(2)
+  largerarea.select <- driver$findElement(using = 'xpath', value = selector_list$coveragearea_dropdown)$clickElement()
+  region.select <- driver$findElement(using = 'xpath', value = '/html/body/div/div/main/div/div/div/div/form/fieldset/div/div[2]/div/div/div[1]/select/option[4]')$clickElement()
+     Sys.sleep(2)
+  search_field <- driver$findElement(using = "xpath", value = selector_list$areasearch_box)
+  search_field$clearElement()
+  search_field$sendKeysToElement(list(region))
+  search <- driver$findElement(using = 'xpath', value = selector_list$search_button)$clickElement()
+     Sys.sleep(2)
+  get.select <- search <- driver$findElement(using = 'xpath', value = selector_list$get_button)$clickElement()
+  continue.select2 <- driver$findElement(using = 'xpath', value = selector_list$continue_button2)$clickElement()
+     Sys.sleep(2)
+
+  # download data
+  getdata.select <- driver$findElement(using = 'xpath', value = selector_list$getdata_button)$clickElement()
+  Sys.sleep(20)
+  csv.select <- driver$findElement(using = 'xpath', value = '//*[@id="csv-label"]')$clickElement()
+  download.select <- driver$findElement(using = 'xpath', value = selector_list$download_button)$clickElement()
+}
+
+# get multiple deprivation data for London MSOAs
+census_msoaregion_scraper("https://www.ons.gov.uk/datasets/TS011/editions/2021/versions/5", "London")
+
+# get ethnicity data for London MSOAs
+census_msoaregion_scraper("https://www.ons.gov.uk/datasets/TS021/editions/2021/versions/1", "London")
+
+# close the RSelenium processes:
+driver$close()
+rD$server$stop()
+
+```
+
+
+```{r spatial census and stop and search, results='hide'}
+# In this section, I load the scraped census data and join it to MSOA shapefile data and convert the stop and search data to spatial data. I first clean the census data and calculate the percentage of households with deprivation in at least two dimensions by MSOA.
+
+# load deprivation census data
+# !! Note: name will be different because it includes datetime stamp of download !!
+census_depriv <- read.csv(paste0(path_to_folder, "TS011-2021-5-filtered-2024-01-07T23 33 02Z.csv"))
+
+# calculate count and percentage of households with deprivation in at least two dimensions by MSOA level
+census_depriv2 <- census_depriv %>%
+  group_by(Middle.layer.Super.Output.Areas.Code, Middle.layer.Super.Output.Areas) %>%
+  mutate(
+    totalhouseholds = sum(Observation),
+    depriv2plus = ifelse(Household.deprivation..6.categories..Code %in% c(3, 4, 5), 1, 0)
+  ) %>%
+  filter(depriv2plus == 1) %>%
+  distinct(Middle.layer.Super.Output.Areas.Code, Middle.layer.Super.Output.Areas, .keep_all = TRUE) %>%
+  summarise(
+    sum_depriv_2plus = sum(Observation),
+    perc_depriv_2plus = sum_depriv_2plus / totalhouseholds * 100,
+    totalhouseholds = totalhouseholds
+  ) 
+
+# load scraped ethnicity census data
+census_ethnicity <- read.csv(paste0(paste0(path_to_folder, "TS021-2021-1-filtered-2024-01-07T22 37 46Z.csv")))
+
+# create 5 ethnicity categories from 20 categories
+# summarise ethnicity data with 5 ethnicity categories
+# calculate percentage by MSOA
+census_ethnicity2 <- census_ethnicity %>%
+  mutate(
+    Ethnic.group.6 = case_when(
+      grepl("Does not apply", Ethnic.group..20.categories.) ~ "Does not apply",
+      grepl("Bangladeshi|Chinese|Indian|Pakistani|Other Asian", Ethnic.group..20.categories.) ~ "Asian",
+      grepl("African|Caribbean|Other Black", Ethnic.group..20.categories.) ~ "Black",
+      grepl("White and Asian|White and Black African|White and Black Caribbean|Other Mixed", Ethnic.group..20.categories.) ~ "Mixed",
+      grepl("English, Welsh, Scottish, Northern Irish or British|Irish|Gypsy or Irish Traveller|Roma|Other White", Ethnic.group..20.categories.) ~ "White",
+      grepl("Arab|Any other ethnic group", Ethnic.group..20.categories.) ~ "Other",
+      TRUE ~ "Missing"  # Assign 'Missing' for any categories not covered above
+    )) %>% 
+  filter(Ethnic.group.6 != "Does not apply") %>%
+  group_by(Ethnic.group.6, Middle.layer.Super.Output.Areas, Middle.layer.Super.Output.Areas.Code) %>%
+  summarise(count = sum(Observation)) %>% group_by(Middle.layer.Super.Output.Areas.Code) %>% mutate(perc = count/ sum(count ))
+
+#---------------------------------
+# read in MSOA shapefile, subset to London MSOAs and join with census data
+# source https://borders.ukdataservice.ac.uk/easy_download.html (download English Middle Layer Super Output Areas, 2021 as shapefile)
+englandMSOA <- st_read(paste0(path_to_folder, "England_msoa_2021/england_msoa_2021.shp"))
+ldnMSOA <- subset(englandMSOA, englandMSOA$msoa21cd %in% census_ethnicity2$Middle.layer.Super.Output.Areas.Code)
+st_crs(ldnMSOA) # check coordinate reference system
+
+# merge census deprivation data with spatial daata
+census_depriv2_sf <- merge(census_depriv2, ldnMSOA, by.x = "Middle.layer.Super.Output.Areas.Code", by.y = "msoa21cd")
+census_depriv2_sf <- st_as_sf(census_depriv2_sf)
+
+# merge census ethnicity data with spatial data
+census_ethnicity_sf <- merge(census_ethnicity2, ldnMSOA, by.x = "Middle.layer.Super.Output.Areas.Code", by.y = "msoa21cd")
+census_ethnicity_sf <- st_as_sf(census_ethnicity_sf)
+
+#-------------------------------
+# make stop and search data spatial data
+stopsearch_spatial <- subset(stopsearch, !is.na(stopsearch$longitude))
+stopsearch_spatial <-
+  stopsearch_spatial %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>% 
+  st_transform(st_crs(census_depriv2_sf))
+
+```
+A bivariate map of the odds of stops-and-searches for black people and non-black population was created to investigate the disproportionate black odds further. As can be seen in Map 1. below, there are very few MSOAs in London where the odds of being searched are equal to or lower than 1 - their share of the population in that MSOA. In MSOAs in Richmond upon Thames and Kensington and Chelsea, for example, black people have odds of stop-and-search 10 times that of non-black people while the population of black people in these areas among the lowest quartile.
+
+```{r bivariate plot black odds}
+# In this section, I examine black odds of stop and search against population level ethnicity at MSOA level. I first join the census ethnicity data to the stop and search data and then create a bivariate plot.
+
+# subset to black ethnicity and join with stop and search data
+census_black_sf <- census_ethnicity_sf %>% filter(Ethnic.group.6 == "Black") 
+biethnicity <- st_join(stopsearch_spatial, census_black_sf)
+
+# calculate perc of black stops by MSOA
+biethnicity2 <- biethnicity %>%
+  group_by(Middle.layer.Super.Output.Areas.Code, Middle.layer.Super.Output.Areas, perc) %>%
+  summarise(
+    blackstopperc = table(officer_defined_ethnicity)["Black"] / n() * 100,
+    blackstops = table(officer_defined_ethnicity)["Black"],
+    whitestops = table(officer_defined_ethnicity)["White"]
+  ) %>% mutate(popperc = perc *100,
+)
+
+# add MSOA spatial data
+census_black_sf_subset <- select(census_black_sf, Middle.layer.Super.Output.Areas.Code, geometry)
+biethnicity2_sf <- left_join(unique(st_drop_geometry(biethnicity2)), census_black_sf_subset, by = "Middle.layer.Super.Output.Areas.Code")
+biethnicity2_sf <- st_as_sf(biethnicity2_sf)
+
+# calculate odds of stop and search for black person per MSOA
+biethnicity2_sf$blackstopodds <- biethnicity2_sf$blackstopperc / biethnicity2_sf$popperc
+
+# calculate non-black population
+biethnicity2_sf$nonblackpopperc <- 100 - biethnicity2_sf$popperc
+
+# create custom breaks for odds
+summary(biethnicity2_sf$blackstopodds)
+biethnicity2_sf$blackstopodds_bin <- cut(biethnicity2_sf$blackstopodds, breaks = c(0,1,3, max(biethnicity2_sf$blackstopodds, na.rm = TRUE)), include.lowest = TRUE)
+
+# create classes
+bivardata.ethnicity <- bi_class(biethnicity2_sf, x = "nonblackpopperc", y = "blackstopodds_bin", style = "quantile", dim = 3)
+bivardata.ethnicity <- st_as_sf(bivardata.ethnicity)
+
+# create breaks
+breaks2 <- bi_class_breaks(bivardata.ethnicity, x = nonblackpopperc, y = blackstopodds_bin, style = "quantile",
+                dim = 3, dig_lab = 2, split = FALSE)
+
+# remove thames from shapefile 
+borough<- borough %>% st_transform(st_crs(bivardata.ethnicity))
+bivardata.ethnicity2 <- st_intersection(bivardata.ethnicity, borough)
+
+# --------------------------------
+# map bivariate plot
+# plot bivariate data
+map <- ggplot() +
+  geom_sf(data = bivardata.ethnicity2, mapping = aes(fill = bi_class), color = "#edf2ef", lwd= 0.003, show.legend = FALSE) + bi_scale_fill(pal = "DkCyan2", dim = 3, flip_axes = TRUE)  + 
+  geom_sf(data = borough, color = "#f9f8f6", fill = NA, size = 1.8) +
+  ggtitle("Bivariate Plot of a Black Persons Odds of being Stopped and Searched\nand Non-Black Population in Percent by MSOA") +
+  theme_void() +
+  theme(plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+       panel.border = element_blank(),
+       plot.title = element_text(hjust = 0.5, size= 12))
+  
+# create legend
+legend <- bi_legend(pal = "DkCyan2",
+                    dim = 3,
+                    xlab = "% population non-black",
+                    ylab = "odds of searched being black",
+                    size = 6.4,
+                    breaks = breaks2,
+                    flip_axes = TRUE)
+
+# add legend to plot and add annotations
+finalPlot <- ggdraw() +
+  draw_plot(map, 0.045, 0, 1.1, 1) +
+  draw_plot({legend + theme(legend.position = "none",
+              plot.background = element_blank(),
+               panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(), 
+              panel.border = element_blank())}, 0.02, 0.06, 0.26, 0.26) +
+  
+    annotate('curve', x = 0.135, xend = 0.473, y = 0.709, yend = 0.763, color = "black", linewidth = 0.19, #44
+    curvature = -0.45,
+    arrow = arrow(length = unit(0.1, 'cm'))) +
+  annotate("text", x = 0.135, y = 0.66, label = "dark green areas mean that a black person has\nhigh odds of being the subject of a stop and search\nand black people make up a low percentage of\nthe population in that area", color = "black", size = 1.85) +
+    annotate('curve', x = 0.899, xend = 0.65, y = 0.22, yend = 0.39, color = "black", linewidth = 0.19, #44
+    curvature = -0.46,
+    arrow = arrow(length = unit(0.1, 'cm'))) +
+  annotate("text", x = 0.899, y = 0.288, label = "light blue areas mean that a black person\nhas above equal and up to 3 times higher odds\nof being the subject of a stop and search and\nblack people make up a high percentage\nof the population in that area", color = "black", size = 1.8)
+
+# plot final plot
+finalPlot
+```
+## Living Standards
+
+To better understand the context within which stops-and-searches occur in London, another bivariate plot was created examining the number of stops-and-searches per 100 households and household deprivation in two or more dimensions. As can be seen on Map 2, there are areas with low deprivation levels in central London that frequently see more stops-and-searches than there are households in that area and other low deprivation areas (generally outside of central London) with very few stops-and-searches.
+
+```{r deprivation and stop and search bivariate plot}
+# In this section, I examine deprivation in two or more dimensions against stop and searches per 100 households by MSOA. I first join the census deprivation data to the stop and search data and then create a bivariate plot.
+
+# subset census data to black ethnicity
+bidepriv <- st_join(stopsearch_spatial, census_depriv2_sf)
+
+# calculate perc of black stops by MSOA
+bidepriv2 <- bidepriv %>%
+  group_by(Middle.layer.Super.Output.Areas.Code, Middle.layer.Super.Output.Areas, perc_depriv_2plus, sum_depriv_2plus, totalhouseholds) %>%
+  summarise(
+    noactionperc = table(outcome)["A no further action disposal"] / n() * 100,
+    allstops = n(),
+    noactionstops = table(outcome)["A no further action disposal"]
+  ) %>% mutate(perc_depriv_2plus = perc_depriv_2plus,
+               sum_depriv_2plus = sum_depriv_2plus,
+               noactionbyhh = noactionstops/totalhouseholds,
+               allstopsbyhh = allstops/totalhouseholds) 
+
+# no action arrests by 100 households
+bidepriv2$noactionbyhh100 <- bidepriv2$noactionbyhh * 100
+bidepriv2$allstopsbyhh100 <- bidepriv2$allstopsbyhh * 100
+
+# add MSOA spatial data
+census_depriv2_sf_subset <- select(census_depriv2_sf, Middle.layer.Super.Output.Areas.Code, geometry)
+bidepriv2_sf <- left_join(unique(st_drop_geometry(bidepriv2)), census_depriv2_sf_subset, by = "Middle.layer.Super.Output.Areas.Code")
+bidepriv2_sf <- st_as_sf(bidepriv2_sf)
+
+# create classes
+bivardata.depriv <- bi_class(bidepriv2_sf, x = "perc_depriv_2plus", y = "allstopsbyhh100", style = "fisher", dim = 4)
+bivardata.depriv <- st_as_sf(bivardata.depriv)
+
+# create breaks
+breaks3 <- bi_class_breaks(bivardata.depriv, x = perc_depriv_2plus, y = allstopsbyhh100, style = "fisher",
+                dim = 4, dig_lab = c(2,3), split = FALSE)
+
+# remove thames from shapefile 
+borough<- borough %>% st_transform(st_crs(bivardata.depriv))
+bivardata.depriv2 <- st_intersection(bivardata.depriv, borough)
+
+# --------------------------------
+# map results
+# map bivariate plot
+map <- ggplot() +
+  geom_sf(data = bivardata.depriv2, mapping = aes(fill = bi_class), color = NA, show.legend = FALSE) + bi_scale_fill(pal = "DkViolet2", dim = 4, flip_axes = TRUE)  + 
+  geom_sf(data = borough, color = "#f9f8f6", fill = NA, size = 1.8) +
+  ggtitle("Bivariate Plot of Stop and Searches per 100 Households and\nPercentage of Households experiencing Deprivation in 2 or more Dimensions") +
+    theme_void() +
+  theme(plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+       panel.border = element_blank(),
+       plot.title = element_text(hjust = 0.5, size= 11.8))
+  
+
+legend <- bi_legend(pal = "DkViolet2",
+                    dim = 4,
+                    xlab = "Higher % of HH deprivation",
+                    ylab = "More stops and searches (per 100HH)",
+                    size = 6.4,
+                    breaks = breaks3,
+                    flip_axes = TRUE)
+
+
+finalPlot2 <- ggdraw() +
+  draw_plot(map, 0.05, 0, 1.1, 1) +
+  draw_plot({legend + theme(legend.position = "none",
+              plot.background = element_blank(),
+               panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(), 
+              panel.border = element_blank())}, 0.02, 0.06, 0.3, 0.3) +
+  
+    annotate('curve', x = 0.135, xend = 0.561, y = 0.69, yend = 0.503, color = "black", linewidth = 0.19, #44
+    curvature = -0.56,
+    arrow = arrow(length = unit(0.1, 'cm'))) +
+  annotate("text", x = 0.135, y = 0.64, label = "red areas mean a high number of\n stops and searches per 100 households in\nareas where deprivation is among the\nlowest in London", color = "black", size = 1.85) +
+    annotate('curve', x = 0.9, xend = 0.67, y = 0.22, yend = 0.322, color = "black", linewidth = 0.19, #44
+    curvature = -0.46,
+    arrow = arrow(length = unit(0.1, 'cm'))) +
+  annotate("text", x = 0.9, y = 0.275, label = "blue areas mean a high number of\nstops and searches per 100 households in\nareas where deprivation is among the\nhighest in London", color = "black", size = 1.8)
+  finalPlot2
+  
+```
+
+```{r statistical analysis part 1, results= 'hide'}
+# In this section, I ask what proportion of the disproportionality in black/white odds is explained by deprivation? 
+
+# subset census data to black or white ethnicity
+# spatial join to add MSOA information
+census_blckwht <- census_ethnicity_sf %>% 
+  filter(Ethnic.group.6 %in% c("Black", "White")) %>%
+  group_by(Middle.layer.Super.Output.Areas.Code, Middle.layer.Super.Output.Areas) %>%
+  summarise(
+    popblck = sum(ifelse(Ethnic.group.6 == "Black", perc * 100, 0)),
+    popwht = sum(ifelse(Ethnic.group.6 == "White", perc * 100, 0))
+  )
+
+# join with spatial stop and search data
+blckwht_join <- st_join(stopsearch_spatial, census_blckwht)
+
+# calculate perc of black stops by MSOA
+blckwht <- blckwht_join %>%
+  group_by(Middle.layer.Super.Output.Areas.Code, Middle.layer.Super.Output.Areas, popblck, popwht) %>%
+  summarise(
+    blackstopperc = table(officer_defined_ethnicity)["Black"] / n() * 100,
+    blackstops = table(officer_defined_ethnicity)["Black"],
+    whitestopperc = table(officer_defined_ethnicity)["White"]/ n() * 100,
+    whitestops = table(officer_defined_ethnicity)["White"]
+  )  %>% mutate(
+    popblck = popblck,
+    popwht = popwht
+  )
+
+# Merge the summarized data with the geometry of MSOAs
+blckwht_sf <- left_join(unique(st_drop_geometry(blckwht)), census_black_sf_subset, by = "Middle.layer.Super.Output.Areas.Code")
+blckwht_sf <- st_as_sf(blckwht_sf)
+
+# calculate odds of a stop and search for black and white person per MSOA
+blckwht_sf$blackstopodds <- blckwht_sf$blackstopperc / blckwht_sf$popblck
+blckwht_sf$whitestopodds <- blckwht_sf$whitestops / blckwht_sf$popwht
+
+# calculate odds ratio
+blckwht_sf$ratioblckwht <- blckwht_sf$blackstopodds / blckwht_sf$whitestopodds
+
+
+# run regression at MSOA level
+reg.data <- left_join(bivardata.depriv2, st_drop_geometry(blckwht_sf), by = "Middle.layer.Super.Output.Areas.Code")
+
+ ggplot(reg.data, aes(x=perc_depriv_2plus, y=ratioblckwht)) +
+  geom_point(colour = "black", size = 3) +    # Use black circles
+  geom_smooth(method=lm)
+
+ 
+model.1 <- lm(ratioblckwht ~ perc_depriv_2plus, data = reg.data)
+summary(model.1)
+
+```
+
+The stark differences between black and white odds may in part be explained by living standards. To test this, the relationship between black/white odds and living standards was examined at the borough level. As seen in the regression output below, when considering these living standard variables 50.5% of the variance in black/white odds at a borough level can be explained. The coefficients for income inequality and child poverty are statistically significant at the 0.05 level. Therefore, we can say that, a 1 unit increase in the level of income inequality in a borough is associated with an increase in the odds of black/white stops and searches of 2.97. 
+
+Note: Data was missing for the City-of-London and Kensington-and-Chelsea. These boroughs are not included in the regression.
+
+```{r scraping living standards and statistical analysis part 2}
+# In this section I further investigate to what extent the disproportionate odds of black vs white getting stopped and searched are related to living standards.
+# Note: Doing this at an MSOA level would have been more insightful but the data was not available.
+#For this, I scrape data on child poverty, poverty rate, income inequality, and income deprivation from https://trustforlondon.org.uk/data/boroughs/ at a borough level. I then re-run the statistical analysis at the borough level including these indicators.
+
+# start RSelinium session
+# rD <- rsDriver(browser=c("firefox"), verbose = F, port = netstat::free_port(random = TRUE), chromever = NULL)
+# driver <- rD$client
+
+# define url
+# url <- "https://trustforlondon.org.uk/data/boroughs/"
+# driver$navigate(url)
+
+# accept cookies
+#accept_button <- driver$findElement(using = "xpath", 
+#                                    value = "/html/body/form/div/button")$clickElement()
+
+# define scraper function 
+# livingsd_scraper <- function(url, start, end) {
+  # create an empty dataframe to store the results
+#  df <- data.frame(
+#     borough.name = character(),
+#     incineq = character(),
+#     childpov = character(),
+#     incdepriv = character(),
+#    povrate = character(),
+#    stringsAsFactors = FALSE
+#  )
+  
+  
+#  for (i in start:end) {
+    # First, navigate the browser to the main boroughs page
+#    driver$navigate(url)
+  
+    # next, go to the i-th borough link and click
+#    neighbourhood.path <- paste0('/html/body/main/div/section/div/div[2]/ol/li[',i,']/a')
+
+#    neighbourhood.path.select <- driver$findElement(using = 'xpath', value = neighbourhood.path)
+#    neighbourhood.path.select$clickElement()
+#    neighbourhood.path.select$clickElement()
+
+
+    # Finally, click on the "Living Standards" tab
+#    Sys.sleep(5)
+#    livingsd.select <- driver$findElement(using = 'xpath', value = '//*[@id="tab-living-standards"]')
+#    livingsd.select$clickElement()
+#    livingsd.select$clickElement()
+
+
+    # Extract information and append it to the dataframe
+#    df <- rbind(
+#      df,
+#      data.frame(
+#       borough.name = driver$findElement(using = 'xpath', value = '/html/body/header/div/h1')$getElementText()[[1]],
+# incineq = driver$findElement(using = 'xpath', value = '//*[@id="panel-living-standards"]/div/div/div[3]/div[2]/span')$getElementAttribute("innerHTML")[[1]],
+#      childpov = driver$findElement(using = 'xpath', value = '//*[@id="panel-living-standards"]/div/div/div[1]/div[2]/span')$getElementAttribute("innerHTML")[[1]],
+#       incdepriv = driver$findElement(using = 'xpath', value = '//*[@id="panel-living-standards"]/div/div/div[2]/div[2]/span')$getElementAttribute("innerHTML")[[1]],
+#        povrate = driver$findElement(using = 'xpath', value = '//*[@id="panel-living-standards"]/div/div/div[4]/div[2]/span')$getElementAttribute("innerHTML")[[1]]
+#     )
+#    ) 
+#    Sys.sleep(3)
+#  }
+  
+#  return(df)
+# }
+
+# close the RSelenium processes:
+# driver$close()
+# rD$server$stop()
+
+# scrape borough level living standards data for all 33 boroughs ( incl. city of London)
+# livingsd <- livingsd_scraper("https://trustforlondon.org.uk/data/boroughs/", 2, 34) 
+
+# clean data
+# Extract only the relevant numeric values from each living standards indicator
+# livingsd$incineq <- str_extract(livingsd$incineq, "\\d+\\.\\d+")
+# livingsd$childpov <- str_extract(livingsd$childpov, "\\d+(?=%)")
+# livingsd$incdepriv <- str_extract(livingsd$incdepriv, "\\d+(?=\n)")
+# livingsd$povrate <- str_extract(livingsd$povrate, "\\d+(?=%)")
+
+# write csv
+# write.csv(livingsd, "livingsd_data.csv")
+
+# read in scraped data
+livingsd <- read.csv(paste0(path_to_folder, "livingsd_data.csv"))
+
+# join livingsd to borough dataframe
+livingsd.borough <- merge(borough, livingsd, by.x="NAME", by.y= "borough.name")
+
+# extract borough name from MSOA name
+reg.data$Borough <- str_extract(reg.data$Middle.layer.Super.Output.Areas.x , ".*(?=\\s\\d{3})")
+
+# merge regression data with borough level living standards
+reg.data3 <- merge(st_drop_geometry(reg.data), livingsd.borough, by.x="Borough", by.y= "NAME")
+
+# calculate borough level odds ratio for black stop and search and percentage deprived 
+reg.data4 <- reg.data3 %>%
+  group_by(Borough, incineq, povrate, childpov, incdepriv) %>%
+  summarise(
+    ratioblckwht = mean(ratioblckwht),
+    perc_depriv_2plus = mean(perc_depriv_2plus)
+  ) 
+
+reg.data4$incineq <- as.numeric(reg.data4$incineq)
+reg.data4$incdepriv <- as.numeric(reg.data4$incdepriv)
+reg.data4$povrate <- as.numeric(reg.data4$povrate)
+reg.data4$childpov <- as.numeric(reg.data4$childpov)
+
+# examine relationships
+ggplot(reg.data4, aes(x=incineq, y=ratioblckwht)) +
+  geom_point(colour = "black", size = 3) +    # use black circles
+  geom_smooth(method=lm)
+
+# run regression model with all living standard indicators and print summary
+model.4 <- lm(ratioblckwht ~  incineq  + incdepriv + childpov + povrate, data = reg.data4)
+summary(model.4)
+
+```
+
+## Code Appendix:
+
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+# this chunk generates the complete code appendix. 
+```
