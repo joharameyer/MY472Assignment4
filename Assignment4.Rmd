@@ -118,7 +118,6 @@ extract$Date <- as.Date(as.character(extract$Date))
 extract2022_23 <- subset(extract, extract$Date >= as.Date("2022-01-01") & extract$Date < as.Date("2024-01-01"))
 
 # get column names
-colnames(met_ss_22_23)
 colnames(extract2022_23)
 
 # add month year column
